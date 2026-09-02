@@ -1,0 +1,55 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Data / model checkpoints (don't commit large binaries)
+*.pkl
+*.pt
+*.pth
+*.h5
+*.parquet
+data/raw/
+data/processed/
+checkpoints/
+runs/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# pytest cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# env files (never commit secrets)
+.env
+*.env
