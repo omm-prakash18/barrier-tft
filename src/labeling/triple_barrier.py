@@ -263,8 +263,13 @@ def label_universe(
         prices = grp.set_index("timestamp")["close"]
 
         # Candidate entries: every event_spacing-th bar (skip warm-up period)
-        entry_times = prices.index[vol_window::event_spacing]
+        # Clip entries so every event has at least max_holding bars of future data.
+        # Without this, events near the end produce truncated vertical barriers
+        # with inconsistent return magnitudes.
+        safe_end    = max(len(prices) - max_holding - 1, vol_window)
+        entry_times = prices.index[vol_window:safe_end:event_spacing]
         events      = pd.DataFrame(index=entry_times)
+
 
         labels = get_barrier_labels(
             prices, events,

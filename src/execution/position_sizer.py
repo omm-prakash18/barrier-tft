@@ -87,11 +87,10 @@ class PositionSizer:
         df = signals_df.copy()
 
         # ── 1. Confidence from calibrated band width ──────────────────────
-        bw               = df["band_width"].clip(lower=1e-4)
-        df["confidence"] = (1.0 / bw).clip(upper=1.0 / 1e-4)
-        # Normalize confidence to [0, 1] relative to band floor
-        max_conf         = 1.0 / 1e-4
-        df["confidence"] = (df["confidence"] / max_conf).clip(0.0, 1.0)
+        # Smooth bounded confidence in (0, 1]: 1 / (1 + band_width)
+        bw               = df["band_width"].clip(lower=0.0)
+        df["confidence"] = 1.0 / (1.0 + bw)
+
 
         # ── 2. Total cost estimate ────────────────────────────────────────
         df["total_cost_est"] = self.spread_bps + self.cost_bps
@@ -177,4 +176,5 @@ if __name__ == "__main__":
     print(result[["p50", "confidence", "final_size_frac", "final_size_dollars", "direction"]].head(10))
     # Verify: skipped signals have size = 0
     assert (result.loc[result["meta_decision"] == 0, "final_size_frac"] == 0).all()
-    print("✓ PositionSizer test passed.")
+    print("[OK] PositionSizer test passed.")
+

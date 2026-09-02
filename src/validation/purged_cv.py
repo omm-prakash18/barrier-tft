@@ -234,4 +234,5 @@ if __name__ == "__main__":
         print(f"Fold {fold}: train={len(tr)}, test={len(te)}, "
               f"test_range=[{te[0]}, {te[-1]}]")
         fold_sizes.append((len(tr), len(te)))
-    print("✓ PurgedKFold sanity check passed.")
+    print("[OK] PurgedKFold sanity check passed.")
+

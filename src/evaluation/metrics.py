@@ -324,34 +324,34 @@ def print_report(report: dict) -> None:
     print("="*60)
 
     if "basic" in report:
-        print("\n── Basic Performance ──")
+        print("\n-- Basic Performance --")
         for k, v in report["basic"].items():
             print(f"  {k:30s}: {v:.4f}" if isinstance(v, float) else f"  {k:30s}: {v}")
 
     if "dsr_stats" in report:
         d = report["dsr_stats"]
-        print(f"\n── Deflated Sharpe Ratio ──")
+        print(f"\n-- Deflated Sharpe Ratio --")
         print(f"  Naive SR (annualized)  : {d.get('sr', 0):.4f}")
         print(f"  PSR (prob SR > 0)      : {d.get('psr', 0):.4f}")
         print(f"  Deflated SR (DSR)      : {d.get('dsr', 0):.4f}")
         print(f"  Expected Max SR ({d.get('n_trials',0)} trials): {d.get('e_max_sr', 0):.4f}")
         print(f"  Skewness               : {d.get('skewness', 0):.4f}")
         print(f"  Excess Kurtosis        : {d.get('excess_kurtosis', 0):.4f}")
-        sig = "✓ SIGNIFICANT" if d.get("is_significant") else "✗ NOT SIGNIFICANT"
+        sig = "[OK] SIGNIFICANT" if d.get("is_significant") else "[FAIL] NOT SIGNIFICANT"
         print(f"  {sig}")
 
     if "pbo_stats" in report:
         p = report["pbo_stats"]
-        print(f"\n── Probability of Backtest Overfitting (PBO) ──")
+        print(f"\n-- Probability of Backtest Overfitting (PBO) --")
         print(f"  PBO                    : {p.get('pbo', 0):.4f}")
         print(f"  Logit PBO              : {p.get('logit_pbo', 0):.4f}")
         print(f"  Median OOS delta SR    : {p.get('median_oos_delta_sr', 0):.4f}")
         print(f"  N combinations         : {p.get('n_combinations', 0)}")
-        print(f"  {'⚠ OVERFIT' if p.get('is_overfit') else '✓ NOT OVERFIT'}")
+        print(f"  {'[WARN] OVERFIT' if p.get('is_overfit') else '[OK] NOT OVERFIT'}")
 
     if "regime_breakdown" in report:
         rb = pd.DataFrame(report["regime_breakdown"])
-        print(f"\n── Regime-Conditioned Performance ──")
+        print(f"\n-- Regime-Conditioned Performance --")
         print(rb.to_string(index=False))
 
     print("\n" + "="*60)
@@ -365,16 +365,18 @@ if __name__ == "__main__":
     T = 500
     daily_rets = rng.standard_t(df=4, size=T) * 0.008 + 0.0003
 
-    print("── Testing Deflated Sharpe Ratio ──")
+    print("-- Testing Deflated Sharpe Ratio --")
     dsr = deflated_sharpe_ratio(daily_rets, n_trials=50)
     for k, v in dsr.items():
         print(f"  {k}: {v}")
 
-    print("\n── Testing PBO ──")
+    print("\n-- Testing PBO --")
+
     N = 6   # 6 strategy variants
     ret_mat = rng.standard_normal((T, N)) * 0.01
     ret_mat[:, 0] += 0.0003   # one slightly better strategy
     pbo = probability_of_backtest_overfitting(ret_mat, n_subsets=4)
     print(f"  PBO: {pbo['pbo']:.4f}, N combos: {pbo['n_combinations']}")
 
-    print("\n✓ Metrics module tests passed.")
+    print("\n[OK] Metrics module tests passed.")
+

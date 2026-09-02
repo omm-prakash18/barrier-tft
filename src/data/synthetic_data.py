@@ -93,11 +93,12 @@ def generate_market_data(
         sigma       = RNG.uniform(0.008, 0.025)
 
         close = _simulate_price_series(n_bars, start_price=start_price, sigma=sigma)
-        # Simulate intrabar OHLV
-        noise = RNG.uniform(0.995, 1.005, n_bars)
+        # Simulate intrabar OHLV strictly adhering to high >= max(open, close) >= min(open, close) >= low
         open_  = close * RNG.uniform(0.997, 1.003, n_bars)
-        high   = np.maximum(open_, close) * noise
-        low    = np.minimum(open_, close) / noise
+        high_bump = RNG.uniform(1.0, 1.006, n_bars)
+        low_dip   = RNG.uniform(0.994, 1.0, n_bars)
+        high   = np.maximum(open_, close) * high_bump
+        low    = np.minimum(open_, close) * low_dip
         volume = (RNG.lognormal(mean=10.0, sigma=1.2, size=n_bars) * 100).astype(int)
 
         is_active = (pd.isna(delisted) | (timestamps < delisted)).astype(bool)

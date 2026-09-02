@@ -121,6 +121,17 @@ class Backtester:
         """
         # Only take "acted" signals
         acted = signals_df[signals_df["final_size_frac"] > 0].copy()
+        if acted.empty:
+            start_ts = price_df["timestamp"].min() if not price_df.empty else pd.Timestamp.now(tz="UTC")
+            end_ts   = price_df["timestamp"].max() if not price_df.empty else pd.Timestamp.now(tz="UTC")
+            daily_idx = pd.date_range(start=start_ts.date(), end=end_ts.date(), freq="D", tz="UTC")
+            return BacktestResult(
+                equity_curve=pd.Series(self.initial_capital, index=daily_idx),
+                trade_log=pd.DataFrame(),
+                daily_returns=pd.Series(0.0, index=daily_idx),
+                initial_capital=self.initial_capital,
+            )
+
         acted.sort_values("t0", inplace=True)
 
         capital      = self.initial_capital
@@ -135,6 +146,7 @@ class Backtester:
             end=acted["t1"].max().date(),
             freq="D",
         )
+
 
         for ts in all_timestamps:
             ts = pd.Timestamp(ts, tz="UTC")

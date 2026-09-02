@@ -26,6 +26,49 @@ import torch.nn.functional as F
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Positional Encoding
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SinusoidalPositionalEncoding(nn.Module):
+    """
+    Fixed sinusoidal positional encoding (Vaswani et al., 2017).
+
+    Added to the LSTM output sequence before self-attention so that
+    attention heads can distinguish temporal positions without relying
+    solely on the LSTM's implicit ordering.
+
+    Design note — encoder-only architecture:
+    This TFT is used as an encoder-only model for single-step forecasting
+    (predict one vol-normalized return at horizon t0+max_holding). The TFT
+    paper's decoder is only needed for multi-step auto-regressive generation.
+    Since we predict a single scalar from the last encoder hidden state,
+    we skip the decoder entirely — this is the correct simplification.
+    Self-attention here uses FULL (non-causal) attention over the encoder
+    window: the model may attend to any historical timestep when computing
+    the representation for the final step. This is appropriate because:
+      (a) all encoder inputs are strictly past data (causal at the data level),
+      (b) we only read out h_last = post[:, -1, :] for the prediction,
+      (c) causal masking would be needed only if we auto-regressively decoded.
+    """
+
+    def __init__(self, d_model: int, max_len: int = 512):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)                        # (max_len, d_model)
+        pos = torch.arange(max_len, dtype=torch.float).unsqueeze(1)  # (max_len, 1)
+        div = torch.exp(
+            torch.arange(0, d_model, 2, dtype=torch.float)
+            * (-math.log(10000.0) / d_model)
+        )                                                          # (d_model/2,)
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div[:d_model // 2])
+        self.register_buffer("pe", pe.unsqueeze(0))               # (1, max_len, d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, T, d_model) → x + positional signal."""
+        return x + self.pe[:, :x.size(1), :]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Sub-modules
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -203,30 +246,32 @@ class InterpretableMultiHeadAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
+        Full (non-causal) attention over the encoder window.
+
+        Causal masking is intentionally omitted — see SinusoidalPositionalEncoding
+        docstring for the design rationale. All encoder timesteps are visible
+        to each other; only h_last is used for the final prediction.
+
         x: (B, T, d_model)
         Returns:
-            out        : (B, T, d_model)
+            out         : (B, T, d_model)
             attn_weights: (B, n_heads, T, T)
         """
         B, T, _ = x.shape
         Q = self.q_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         K = self.k_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
-        V = self.v_proj(x)  # (B, T, d_head) — shared
+        V = self.v_proj(x)  # (B, T, d_head) — shared across heads
 
         scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale  # (B, H, T, T)
-
-        # Causal mask: lower-triangular
-        mask   = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
-        scores = scores.masked_fill(~mask, float("-inf"))
+        # Full attention: no causal mask (encoder-only, single-step output)
         attn   = F.softmax(scores, dim=-1)
         attn   = self.dropout(attn)
 
         # Shared V: expand to (B, H, T, d_head)
         V_exp  = V.unsqueeze(1).expand(-1, self.n_heads, -1, -1)
-        ctx    = (attn @ V_exp)                          # (B, H, T, d_head)
-        ctx    = ctx.transpose(1, 2).reshape(B, T, -1)   # (B, T, H*d_head = d_model — No, d_model=H*d_head)
-        # Note: H * d_head might differ from d_model when shared V. Reproject:
-        ctx    = self.out_proj(ctx[..., :self.n_heads * self.d_head])
+        ctx    = (attn @ V_exp)                           # (B, H, T, d_head)
+        ctx    = ctx.transpose(1, 2).reshape(B, T, self.n_heads * self.d_head)
+        ctx    = self.out_proj(ctx)
 
         return self.ln(ctx + x), attn
 
@@ -321,6 +366,9 @@ class TFT(nn.Module):
         self.feature_proj = nn.ModuleList([
             nn.Linear(1, hidden_dim) for _ in range(n_enc_features)
         ])
+        # VSN weight selector: registered in __init__ so it appears in state_dict
+        # and survives model checkpointing. Input: concat(context, raw_features).
+        self._vsn_select = nn.Linear(hidden_dim + n_enc_features, n_enc_features)
 
         # ── LSTM sequence encoder ─────────────────────────────────────────
         self.lstm = nn.LSTM(
@@ -339,7 +387,8 @@ class TFT(nn.Module):
         self.post_lstm_ln   = nn.LayerNorm(hidden_dim)
 
         # ── Interpretable Multi-Head Self-Attention ───────────────────────
-        self.attn = InterpretableMultiHeadAttention(hidden_dim, n_heads, dropout)
+        self.attn    = InterpretableMultiHeadAttention(hidden_dim, n_heads, dropout)
+        self.pos_enc = SinusoidalPositionalEncoding(hidden_dim)
 
         # ── Post-attention GRN + LN ──────────────────────────────────────────────
         # c_h enriches the post-attention representations (TFT paper, §4.2)
@@ -396,8 +445,11 @@ class TFT(nn.Module):
         gated = self.post_lstm_gate(lstm_out.reshape(B * T, -1)).view(B, T, -1)
         gated = self.post_lstm_ln(gated + lstm_input)
 
-        # ── Self-Attention ────────────────────────────────────────────────
-        attn_out, attn_weights = self.attn(gated)      # (B, T, hidden_dim)
+        # ── Self-Attention (full, non-causal) ─────────────────────────────────────────
+        # Add sinusoidal position signal before attention so heads can
+        # distinguish temporal positions (LSTM implicit ordering is insufficient).
+        gated_pos = self.pos_enc(gated)                      # (B, T, hidden_dim)
+        attn_out, attn_weights = self.attn(gated_pos)        # (B, T, hidden_dim)
 
         # Post-attention GRN conditioned on c_h (static attention context)
         # Expand c_h to match temporal dimension: (B, hidden_dim) -> (B*T, hidden_dim)
@@ -422,16 +474,14 @@ class TFT(nn.Module):
         self, x_enc: torch.Tensor, context: torch.Tensor
     ) -> torch.Tensor:
         """
-        Simple gated selection over raw feature magnitudes.
+        Gated temporal variable selection conditioned on static context.
         Returns (B, T, n_enc_features) logits.
+        self._vsn_select is registered in __init__ so it is included in state_dict.
         """
         B, T, n_feat = x_enc.shape
-        ctx_exp = context.unsqueeze(1).expand(B, T, -1)  # (B, T, hidden_dim)
-        # Use a learned linear combination of features conditioned on context
-        if not hasattr(self, "_vsn_select"):
-            self._vsn_select = nn.Linear(self.hidden_dim + n_feat, n_feat).to(x_enc.device)
-        combined = torch.cat([ctx_exp, x_enc], dim=-1)   # (B, T, hidden_dim+n_feat)
-        return self._vsn_select(combined)                 # (B, T, n_feat) logits
+        ctx_exp  = context.unsqueeze(1).expand(B, T, -1)   # (B, T, hidden_dim)
+        combined = torch.cat([ctx_exp, x_enc], dim=-1)     # (B, T, hidden_dim+n_feat)
+        return self._vsn_select(combined)                   # (B, T, n_feat) logits
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -564,6 +614,68 @@ def predict_tft(
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Checkpointing
+# ─────────────────────────────────────────────────────────────────────────────
+
+import pathlib
+
+
+def save_checkpoint(
+    model: TFT,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    loss: float,
+    model_kwargs: dict,
+    path: str | pathlib.Path,
+) -> None:
+    """
+    Persist model state, optimizer state, and constructor kwargs.
+
+    Saves everything needed to resume training or run inference:
+      - model.state_dict()   — all weights including _vsn_select, pos_enc buffer
+      - optimizer.state_dict()
+      - model_kwargs         — constructor args to rebuild TFT architecture
+      - epoch, loss          — training metadata
+
+    Usage:
+        save_checkpoint(model, optimizer, epoch=5, loss=0.32,
+                        model_kwargs={"n_tickers": 10, ...},
+                        path="checkpoints/tft_epoch5.pt")
+    """
+    pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "epoch":        epoch,
+            "loss":         loss,
+            "model_state":  model.state_dict(),
+            "optim_state":  optimizer.state_dict(),
+            "model_kwargs": model_kwargs,
+        },
+        path,
+    )
+
+
+def load_checkpoint(
+    path: str | pathlib.Path,
+    device: torch.device,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+) -> tuple[TFT, dict]:
+    """
+    Restore TFT from checkpoint. Returns (model, metadata_dict).
+
+    Example:
+        model, meta = load_checkpoint("checkpoints/tft_epoch5.pt", device)
+        print(f"Resumed from epoch {meta['epoch']}, loss={meta['loss']:.4f}")
+    """
+    ckpt  = torch.load(path, map_location=device, weights_only=False)
+    model = TFT(**ckpt["model_kwargs"]).to(device)
+    model.load_state_dict(ckpt["model_state"])
+    if optimizer is not None:
+        optimizer.load_state_dict(ckpt["optim_state"])
+    return model, {"epoch": ckpt["epoch"], "loss": ckpt["loss"]}
+
+
 if __name__ == "__main__":
     # Quick smoke test — random tensors
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -583,5 +695,6 @@ if __name__ == "__main__":
 
     assert (p10 <= p50).all(), "Monotonicity violated: P10 > P50"
     assert (p50 <= p90).all(), "Monotonicity violated: P50 > P90"
-    print(f"✓ TFT smoke test passed. P10={p10[0]:.4f}  P50={p50[0]:.4f}  P90={p90[0]:.4f}")
+    print(f"[OK] TFT smoke test passed. P10={p10[0]:.4f}  P50={p50[0]:.4f}  P90={p90[0]:.4f}")
+
     print(f"  Attn shape: {out['attn_weights'].shape}")

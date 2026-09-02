@@ -151,16 +151,19 @@ class GBDTBaseline:
             self.models.append(model)
 
             proba = model.predict_proba(X_te)
-            self.oof_preds[test_idx] = proba
+            for col_idx, cls_val in enumerate(model.classes_):
+                self.oof_preds[test_idx, cls_val] = proba[:, col_idx]
 
-            y_pred = proba.argmax(axis=1)
+            y_pred = self.oof_preds[test_idx].argmax(axis=1)
+
             metrics = {
                 "fold":          fold_idx,
                 "n_train":       len(train_idx),
                 "n_test":        len(test_idx),
                 "accuracy":      accuracy_score(y_te, y_pred),
                 "bal_accuracy":  balanced_accuracy_score(y_te, y_pred),
-                "log_loss":      log_loss(y_te, proba, labels=list(range(len(self._le.classes_)))),
+                "log_loss":      log_loss(y_te, self.oof_preds[test_idx], labels=list(range(len(self._le.classes_)))),
+
             }
             self.fold_metrics.append(metrics)
             print(

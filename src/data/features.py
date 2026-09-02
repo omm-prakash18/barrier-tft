@@ -176,27 +176,32 @@ def compute_regime_states(
         "mean_corr_proxy": mean_corr_proxy,
     }, index=timestamps).dropna()
 
-    # Walk-forward GMM fit: fit on first 50% of available data, then expand
-    refit_every = max(100, len(regime_features) // 20)
-    regimes     = pd.Series(np.nan, index=timestamps)
-
+    # Walk-forward GMM fit: fit periodically on expanding historical data
+    refit_every = max(200, len(regime_features) // 20)
+    regimes_arr = np.zeros(len(regime_features), dtype=int)
+    
     scaler = StandardScaler()
-    gmm    = None
-
-    for i in range(min_periods, len(regime_features)):
-        if gmm is None or (i % refit_every == 0):
-            train = regime_features.iloc[:i]
-            X_train = scaler.fit_transform(train.values)
-            gmm = GaussianMixture(n_components=n_regimes, random_state=42, n_init=3)
+    gmm = None
+    
+    # Process in chunks to vectorize predict while preserving point-in-time causality
+    for chunk_start in range(0, len(regime_features), refit_every):
+        chunk_end = min(chunk_start + refit_every, len(regime_features))
+        fit_idx = max(min_periods, chunk_start)
+        train_data = regime_features.iloc[:fit_idx].values
+        
+        if len(train_data) >= min_periods:
+            X_train = scaler.fit_transform(train_data)
+            gmm = GaussianMixture(n_components=n_regimes, random_state=42, n_init=1)
             gmm.fit(X_train)
+            
+            chunk_data = regime_features.iloc[chunk_start:chunk_end].values
+            X_chunk = scaler.transform(chunk_data)
+            regimes_arr[chunk_start:chunk_end] = gmm.predict(X_chunk)
+        else:
+            regimes_arr[chunk_start:chunk_end] = 0
 
-        row  = regime_features.iloc[[i]]
-        X_t  = scaler.transform(row.values)
-        pred = gmm.predict(X_t)[0]
-        regimes.iloc[timestamps.get_loc(regime_features.index[i])] = int(pred)
-
-    # Forward-fill for bars that couldn't be computed
-    regimes = regimes.ffill().fillna(0).astype(int)
+    regime_series = pd.Series(regimes_arr, index=regime_features.index)
+    regimes = regime_series.reindex(timestamps).ffill().fillna(0).astype(int)
 
     # Map back to bar-level dataframe
     regime_map = regimes.to_dict()
@@ -220,82 +225,78 @@ def merge_sentiment_features(
 ) -> pd.DataFrame:
     """
     Merges credibility-weighted FinBERT sentiment into bar_df.
-
-    For each bar at timestamp t and ticker k:
-      1. Collect all news events for k where article_public_ts + latency <= t
-         (enforces reaction-latency buffer — LEAKAGE RULE).
-      2. Within the last `decay_bars` bars, compute an exponentially-decayed,
-         credibility-weighted mean sentiment.
-
-    New columns:
-        weighted_sentiment     — float in ~[-1, 1]
-        sentiment_count        — number of contributing news events
-        max_credibility        — max credibility of contributing sources
-
-    Returns a copy of bar_df with sentiment columns added.
+    High-performance implementation: iterates over news events (O(N_news))
+    using searchsorted instead of looping over every bar (O(N_bars)).
     """
     bar_df  = bar_df.copy().sort_values(["ticker", bar_ts_col])
     news_df = news_df.copy()
 
-    # Compute the first bar timestamp at which each news event CAN be used
     news_df["usable_after"] = (
         news_df[news_public_ts_col]
         + pd.Timedelta(seconds=latency_buffer_sec)
     )
 
-    # Initialize output columns
     bar_df["weighted_sentiment"] = 0.0
     bar_df["sentiment_count"]    = 0
     bar_df["max_credibility"]    = 0.0
 
     bar_freq_seconds = _infer_bar_freq_seconds(bar_df, bar_ts_col)
     decay_window_td  = pd.Timedelta(seconds=bar_freq_seconds * decay_bars)
+    max_age_sec      = max(bar_freq_seconds * decay_bars, 1.0)
 
     for ticker, t_bars in bar_df.groupby("ticker"):
         t_news = news_df[news_df["ticker"] == ticker].copy()
         if t_news.empty:
             continue
 
-        t_news.sort_values("usable_after", inplace=True)
         t_bars_sorted = t_bars.sort_values(bar_ts_col)
+        bar_timestamps = t_bars_sorted[bar_ts_col].values
+        n_bars = len(bar_timestamps)
 
-        ws_vals  = np.zeros(len(t_bars_sorted))
-        cnt_vals = np.zeros(len(t_bars_sorted), dtype=int)
-        mc_vals  = np.zeros(len(t_bars_sorted))
+        ws_numer = np.zeros(n_bars, dtype=np.float64)
+        ws_denom = np.zeros(n_bars, dtype=np.float64)
+        cnt_vals = np.zeros(n_bars, dtype=np.int32)
+        mc_vals  = np.zeros(n_bars, dtype=np.float64)
 
-        for idx, (_, bar_row) in enumerate(t_bars_sorted.iterrows()):
-            bar_ts = bar_row[bar_ts_col]
-            window_start = bar_ts - decay_window_td
+        for _, news_row in t_news.iterrows():
+            u_after = news_row["usable_after"]
+            u_after_ns = u_after.value
+            u_after_dt64 = np.datetime64(u_after_ns, 'ns')
+            w_end_dt64   = np.datetime64((u_after + decay_window_td).value, 'ns')
 
-            # Only news usable before this bar (latency enforced)
-            avail = t_news[
-                (t_news["usable_after"] <= bar_ts)
-                & (t_news[news_public_ts_col] >= window_start)
-            ]
-            if avail.empty:
+
+            # Find bars in range [usable_after, usable_after + decay_window]
+            idx_start = np.searchsorted(bar_timestamps, u_after_dt64, side="left")
+            idx_end   = np.searchsorted(bar_timestamps, w_end_dt64, side="right")
+
+            if idx_start >= n_bars or idx_start >= idx_end:
                 continue
 
-            # Exponential decay weights by age
-            ages_sec    = (bar_ts - avail["usable_after"]).dt.total_seconds().values
-            max_age_sec = max(bar_freq_seconds * decay_bars, 1.0)
-            decay_w     = np.exp(-3.0 * ages_sec / max_age_sec)
+            bar_slice_ns = bar_timestamps[idx_start:idx_end].astype("datetime64[ns]").astype(np.int64)
+            ages_sec     = (bar_slice_ns - u_after_ns) / 1e9
+            decay_w      = np.exp(-3.0 * ages_sec / max_age_sec)
 
-            cred     = avail[credibility_col].values
-            sent     = avail[sentiment_col].values
-            combined = decay_w * cred
 
-            denom = combined.sum()
-            if denom > 1e-10:
-                ws_vals[idx]  = (combined * sent).sum() / denom
-            cnt_vals[idx] = len(avail)
-            mc_vals[idx]  = cred.max()
+            cred = float(news_row[credibility_col])
+            sent = float(news_row[sentiment_col])
+            combined_w = decay_w * cred
 
-        # Write back using the original index
-        bar_df.loc[t_bars_sorted.index, "weighted_sentiment"] = ws_vals
+            ws_numer[idx_start:idx_end] += combined_w * sent
+            ws_denom[idx_start:idx_end] += combined_w
+            cnt_vals[idx_start:idx_end] += 1
+            mc_vals[idx_start:idx_end] = np.maximum(mc_vals[idx_start:idx_end], cred)
+
+        # Compute final weighted sentiment
+        has_news = ws_denom > 1e-10
+        ws_final = np.zeros(n_bars, dtype=np.float64)
+        ws_final[has_news] = ws_numer[has_news] / ws_denom[has_news]
+
+        bar_df.loc[t_bars_sorted.index, "weighted_sentiment"] = ws_final
         bar_df.loc[t_bars_sorted.index, "sentiment_count"]    = cnt_vals
         bar_df.loc[t_bars_sorted.index, "max_credibility"]    = mc_vals
 
     return bar_df
+
 
 
 def _infer_bar_freq_seconds(bar_df: pd.DataFrame, ts_col: str) -> float:

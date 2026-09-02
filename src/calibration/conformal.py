@@ -174,4 +174,5 @@ if __name__ == "__main__":
     cov = cal.empirical_coverage(p10_adj, p90_adj, y_test)
     print(f"Test coverage: {cov:.3f}  (target: {1 - cal.alpha:.0%})")
     assert cov >= 0.85, f"Coverage too low: {cov}"
-    print("✓ SplitConformalCalibrator test passed.")
+    print("[OK] SplitConformalCalibrator test passed.")
+

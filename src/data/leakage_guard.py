@@ -54,7 +54,8 @@ def assert_no_leakage(
             feature_ts_col, news_public_ts_col,
             latency_buffer_sec,
         )
-    print("[LeakageGuard] ✓ All leakage assertions passed.")
+    print("[LeakageGuard] [OK] All leakage assertions passed.")
+
 
 
 def _check_feature_vs_label(
@@ -180,18 +181,33 @@ def _check_news_latency(
 def check_no_future_features(
     feature_matrix: pd.DataFrame,
     timestamp_col: str = "timestamp",
+    ticker_col: str = "ticker",
 ) -> None:
     """
-    Simple monotonicity check: feature rows must be sorted by timestamp
-    and no feature column should reference a future bar.
+    Structural sanity check: each ticker's rows must be sorted by timestamp.
 
-    This is a cheap structural sanity check — it does NOT replace the full
-    assert_no_leakage() call.
+    Cross-sectional DataFrames are sorted by [ticker, timestamp], not globally
+    by timestamp — a global monotonicity check would be a false positive.
+    This checks per-ticker monotonicity, which is the actual causal requirement.
     """
-    ts = feature_matrix[timestamp_col]
-    if not ts.is_monotonic_increasing:
-        raise LeakageError(
-            "[LeakageGuard] Feature matrix is not sorted by timestamp — "
-            "potential ordering leak."
-        )
-    print("[LeakageGuard] ✓ Feature matrix timestamp order is valid.")
+    if ticker_col in feature_matrix.columns:
+        # Per-ticker monotonicity (correct for cross-sectional data)
+        bad_tickers = []
+        for ticker, grp in feature_matrix.groupby(ticker_col):
+            ts = grp[timestamp_col]
+            if not ts.is_monotonic_increasing:
+                bad_tickers.append(ticker)
+        if bad_tickers:
+            raise LeakageError(
+                f"[LeakageGuard] Feature matrix timestamps not monotonically "
+                f"increasing for tickers: {bad_tickers[:5]} — potential ordering leak."
+            )
+    else:
+        # Single-ticker / global check
+        ts = feature_matrix[timestamp_col]
+        if not ts.is_monotonic_increasing:
+            raise LeakageError(
+                "[LeakageGuard] Feature matrix is not sorted by timestamp — "
+                "potential ordering leak."
+            )
+    print("[LeakageGuard] [OK] Feature matrix timestamp order is valid.")
