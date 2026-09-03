@@ -56,10 +56,12 @@ from src.metalabeling.meta_model import (
 from src.execution.position_sizer import PositionSizer
 from src.execution.backtester import Backtester
 
-from src.evaluation.metrics import (
-    generate_evaluation_report,
-    print_report,
-)
+from src.data.universe import PointInTimeUniverse, create_sample_pit_universe
+from src.data.partitioned_store import PartitionedTimeSeriesStore
+from src.validation.distributed_cv import DistributedPurgedCV
+from src.models.exporter import export_tft_to_onnx
+from src.models.inference_engine import TFTInferenceEngine
+from src.evaluation.metrics import generate_evaluation_report, print_report
 
 # Initialize structured logger
 log = get_logger("orchestrator")
@@ -310,6 +312,23 @@ def step56_tft_and_conformal(feature_df: pd.DataFrame, label_df: pd.DataFrame, c
         path=ckpt_path,
     )
     log.info("tft.checkpoint_saved", path=str(ckpt_path))
+
+    # Export to ONNX Engine & Benchmark Inference Latency
+    onnx_path = pathlib.Path(cfg.checkpoint_dir) / "tft_production.onnx"
+    export_tft_to_onnx(model, onnx_path, sample_seq_len=cfg.tft_seq_len)
+    engine = TFTInferenceEngine(onnx_path)
+    perf_stats = engine.benchmark_latency(
+        n_iterations=50,
+        batch_size=min(32, len(test_idx)),
+        seq_len=cfg.tft_seq_len,
+        n_features=n_enc_feat,
+    )
+    log.info(
+        "inference_engine.benchmarked",
+        p50_us=round(perf_stats["p50_us"], 2),
+        p95_us=round(perf_stats["p95_us"], 2),
+        throughput_hz=round(perf_stats["throughput_samples_per_sec"], 1),
+    )
 
     # Conformal calibration
     cal_preds = predict_tft(model, cal_loader, DEVICE)

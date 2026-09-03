@@ -698,3 +698,6 @@ if __name__ == "__main__":
     print(f"[OK] TFT smoke test passed. P10={p10[0]:.4f}  P50={p50[0]:.4f}  P90={p90[0]:.4f}")
 
     print(f"  Attn shape: {out['attn_weights'].shape}")
+
+# Alias for institutional clarity
+TemporalFusionTransformer = TFT

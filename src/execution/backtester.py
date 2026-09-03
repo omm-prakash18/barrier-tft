@@ -148,6 +148,35 @@ class Backtester:
         )
 
 
+        # Pre-index price arrays per ticker for fast searchsorted lookups
+        price_index: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        if not price_df.empty:
+            for ticker, grp in price_df.sort_values("timestamp").groupby("ticker"):
+                price_index[str(ticker)] = (
+                    pd.to_datetime(grp["timestamp"]).values,
+                    grp["close"].to_numpy(dtype=float),
+                )
+
+        def _fast_entry_price(ticker: str, t0: pd.Timestamp) -> Optional[float]:
+            if ticker not in price_index:
+                return None
+            ts_arr, close_arr = price_index[ticker]
+            target_ts = np.datetime64(pd.Timestamp(t0).tz_convert("UTC").tz_localize(None) if pd.Timestamp(t0).tz is not None else pd.Timestamp(t0))
+            idx = np.searchsorted(ts_arr.astype("datetime64[ns]"), target_ts)
+            if idx < len(close_arr):
+                return float(close_arr[idx])
+            return None
+
+        def _fast_exit_price(ticker: str, t1: pd.Timestamp) -> Optional[float]:
+            if ticker not in price_index:
+                return None
+            ts_arr, close_arr = price_index[ticker]
+            target_ts = np.datetime64(pd.Timestamp(t1).tz_convert("UTC").tz_localize(None) if pd.Timestamp(t1).tz is not None else pd.Timestamp(t1))
+            idx = np.searchsorted(ts_arr.astype("datetime64[ns]"), target_ts, side="right") - 1
+            if 0 <= idx < len(close_arr):
+                return float(close_arr[idx])
+            return None
+
         for ts in all_timestamps:
             ts = pd.Timestamp(ts, tz="UTC")
             ts_end = ts + pd.Timedelta(days=1)
@@ -157,9 +186,7 @@ class Backtester:
             for pos in open_positions:
                 if pos["t1"] <= ts_end:
                     # Position closed at t1
-                    close_price = self._lookup_exit_price(
-                        price_df, pos["ticker"], pos["t1"]
-                    )
+                    close_price = _fast_exit_price(pos["ticker"], pos["t1"])
                     if close_price is None:
                         # Use return_at_touch proxy
                         close_price = pos["entry_price"] * (1.0 + pos["return_at_touch"])
@@ -196,9 +223,7 @@ class Backtester:
                 if capital <= 0:
                     break
 
-                entry_price = self._lookup_entry_price(
-                    price_df, sig["ticker"], sig["t0"]
-                )
+                entry_price = _fast_entry_price(sig["ticker"], sig["t0"])
                 if entry_price is None or entry_price <= 0:
                     continue
 

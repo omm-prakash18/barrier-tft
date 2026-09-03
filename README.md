@@ -1,6 +1,6 @@
 # Barrier TFT: Cross-Sectional TFT + FinBERT Equity Forecaster
 
-A production-grade, leak-free, institutional cross-sectional quantitative equity forecasting and trade execution framework combining **Temporal Fusion Transformers (TFT)**, **FinBERT sentiment embeddings with credibility weighting**, **Triple-Barrier labeling with sample uniqueness weighting**, **Purged & Embargoed Cross-Validation**, and **Secondary Meta-Labeling**.
+A production-grade, leak-free, institutional cross-sectional quantitative equity forecasting and trade execution framework combining **Temporal Fusion Transformers (TFT)**, **FinBERT sentiment embeddings with credibility weighting**, **Triple-Barrier labeling with sample uniqueness weighting**, **Purged & Embargoed Cross-Validation**, **Secondary Meta-Labeling**, **High-Throughput ONNX/TensorRT Inference Engine**, and **Point-in-Time Survivorship-Bias Free Universes**.
 
 ---
 
@@ -8,8 +8,9 @@ A production-grade, leak-free, institutional cross-sectional quantitative equity
 
 ```
                                ┌─────────────────────────────┐
-                               │ Real-Time / Historical Data │
-                               │  - Price / Volume Bar Data  │
+                               │ Point-in-Time Data Lake     │
+                               │  - Partitioned Parquet Lake │
+                               │  - PIT Universe (No Bias)   │
                                │  - News Feed (Credibility)  │
                                └──────────────┬──────────────┘
                                               │
@@ -40,9 +41,10 @@ A production-grade, leak-free, institutional cross-sectional quantitative equity
                      ┌────────────────────────┴────────────────────────┐
                      ▼                                                 ▼
         ┌─────────────────────────┐                       ┌─────────────────────────┐
-        │ Purged & Embargoed CV   │                       │ Temporal Fusion Transf. │
-        │ - Overlap Purging (t1)  │                       │ - Monotonic Quantiles   │
-        │ - Serial Embargo buffer │                       │ - Self-Attention        │
+        │ Distributed Purged CV   │                       │ Temporal Fusion Transf. │
+        │ - Parallel CPCV Folds   │                       │ - Monotonic Quantiles   │
+        │ - Serial Embargo buffer │                       │ - Self-Attention & VSN  │
+        │ - Multi-GPU DDP Trainer │                       │ - ONNX / Low Latency    │
         └────────────┬────────────┘                       └────────────┬────────────┘
                      │                                                 │
                      └────────────────────────┬────────────────────────┘
@@ -57,6 +59,7 @@ A production-grade, leak-free, institutional cross-sectional quantitative equity
                              ┌─────────────────────────────────┐
                              │ Realistic Vectorized Backtester │
                              │ - Latency Buffer & Slippage     │
+                             │ - Searchsorted Fast Execution   │
                              │ - Transaction Costs / Spreads   │
                              └─────────────────────────────────┘
 ```
@@ -65,13 +68,23 @@ A production-grade, leak-free, institutional cross-sectional quantitative equity
 
 ## 🚀 Key Modules & Components
 
-- **`src/data/`**: Point-in-time cross-sectional market data collectors, FinBERT news sentiment embedder with source credibility discounting, and Pandera data validation schemas.
+- **`src/data/`**:
+  - **`universe.py`**: Institutional Point-in-Time Universe Manager tracking ticker lifecycles (IPOs, delistings, acquisitions, corporate actions) to guarantee 100% survivorship-bias-free universes.
+  - **`partitioned_store.py`**: High-throughput partitioned Parquet storage with time-travel query filters and predicate pushdown.
+  - **`features.py`**: Cross-sectional features & FinBERT sentiment embeddings with source credibility discounting.
+  - **`schemas.py` & `leakage_guard.py`**: Pandera runtime schema validation contracts and strict timestamp lookahead assertion guards.
 - **`src/labeling/`**: Marcos Lopez de Prado's Triple-Barrier Method (`t0`, `t1`, dynamic volatility barriers) and sample concurrency/uniqueness weighting to remove label redundancy.
-- **`src/validation/`**: Combinatorial & Purged K-Fold Cross-Validation with temporal embargo periods preventing cross-fold information leakage.
-- **`src/models/`**: PyTorch Temporal Fusion Transformer (TFT) with strictly monotonic quantile heads ($P_{10} \le P_{50} \le P_{90}$) reparameterized via Softplus.
+- **`src/validation/`**:
+  - **`purged_cv.py`**: Purged & Embargoed K-Fold Cross-Validation preventing serial correlation and label-horizon leaks.
+  - **`distributed_cv.py`**: Multi-core parallel Combinatorial Purged Cross-Validation (CPCV) coordinator with worker isolation and Out-of-Fold prediction assembly.
+- **`src/models/`**:
+  - **`tft.py`**: PyTorch Temporal Fusion Transformer (TFT) with strictly monotonic quantile heads ($P_{10} \le P_{50} \le P_{90}$) reparameterized via Softplus.
+  - **`exporter.py`**: PyTorch-to-ONNX graph exporter with dynamic batching, sequence dimensions, and TorchScript companion tracing.
+  - **`inference_engine.py`**: Sub-millisecond low-latency production inference engine with multi-threaded CPU / CUDA / TensorRT execution providers and microsecond benchmarking ($p50, p95, p99$).
+  - **`distributed_trainer.py`**: Multi-GPU PyTorch DistributedDataParallel (DDP) coordinator with Automatic Mixed Precision (AMP).
 - **`src/calibration/`**: Calibrated conformal prediction intervals and empirical coverage estimators.
 - **`src/metalabeling/`**: Secondary trade sizing and filtration model (LightGBM) to filter false-positive directional bets net of transaction costs.
-- **`src/execution/`**: Realistic execution simulator factoring in reaction latency buffers, slippage models, spread fees, and turnover penalties.
+- **`src/execution/`**: Vectorized and event-driven execution simulator factoring in reaction latency buffers, slippage models, spread fees, turnover penalties, and fast $O(\log K)$ price lookup indexing.
 
 ---
 
@@ -91,7 +104,7 @@ pip install -e .
 ### Running the Full Pipeline
 
 ```bash
-# Execute end-to-end data generation, training, purged CV, meta-labeling, and backtest
+# Execute end-to-end data generation, training, purged CV, meta-labeling, ONNX export, and backtest
 python main.py
 ```
 
@@ -119,7 +132,7 @@ A suspiciously good result is a bug report, not a success. Check in this order:
 
 1. **Timestamp leakage**: For every feature, print the timestamp it was computed from alongside the label window `[t0, t1]` it's paired with. Confirm `feature_ts <= t0` for every single row, not just on average. Specifically check FinBERT sentiment features — `article_public_ts` vs `article_scraped_ts`/`article_indexed_ts` bugs are the #1 cause of unrealistic backtests in this exact architecture.
 2. **Purge/embargo correctness**: Pick one test fold, manually list 5 training samples closest to its boundary, and confirm their `[t0, t1]` windows truly don't overlap the test fold's date range — off-by-one errors here (purging by `t0` instead of the full `[t0, t1]` window) are extremely common and leak exactly enough to move Sharpe from mediocre to great.
-3. **Survivorship bias**: Confirm the universe at each historical date includes names that were later delisted, not just today's constituents.
+3. **Survivorship bias**: Confirm the universe at each historical date includes names that were later delisted, not just today's constituents (enforced via `src.data.universe.PointInTimeUniverse`).
 4. **Rolling feature leakage**: Any feature using `.rolling()` or `.ewm()` — confirm it's not accidentally centered (`center=True` is a classic silent leak) and that the window only looks backward.
 5. **Duplicate/near-duplicate samples across train/test**: For overlapping-window labels, confirm concurrency weighting is actually being applied, not just computed and discarded.
 6. **Global-statistic normalization leak**: This is arguably the single most common leak in financial ML and it's easy to miss because the code "looks" correct. If any feature is z-scored, min-max scaled, or otherwise normalized using statistics (mean, std, min, max) computed over the full dataset rather than only the training fold available at that point in time, the model has effectively seen the future's distribution. Confirm every normalization step is fit inside the CV loop on the training fold only, and applied (not refit) to validation/test data.
