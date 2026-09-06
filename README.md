@@ -4,7 +4,7 @@ A production-grade, leak-free, institutional cross-sectional quantitative equity
 
 ---
 
-## 🏛 Architecture Overview!
+## 🏛 Architecture Overview
 
 ```
                                ┌─────────────────────────────┐
