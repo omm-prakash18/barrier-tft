@@ -53,7 +53,10 @@ class TFTInferenceEngine:
         if self.backend == "torchscript":
             ts_file = self.model_path if self.model_path.suffix == ".pt" else self.model_path.with_suffix(".pt")
             if ts_file.exists():
-                self._ts_model = torch.jit.load(str(ts_file), map_location="cpu")
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    self._ts_model = torch.jit.load(str(ts_file), map_location="cpu")
                 self._ts_model.eval()
 
     def predict(

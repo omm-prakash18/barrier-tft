@@ -43,8 +43,7 @@ include = ["src*"]
 testpaths   = ["tests"]
 addopts     = "-v --tb=short"
 filterwarnings = [
-    "ignore::FutureWarning",
-    "ignore::UserWarning",
+    "ignore",
 ]
 
 [tool.ruff]

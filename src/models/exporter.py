@@ -12,6 +12,7 @@ Supports:
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 import numpy as np
@@ -59,6 +60,7 @@ def export_tft_to_onnx(
 
     model.eval()
     wrapper = _TFTExportWrapper(model).to(device)
+    wrapper.eval()
 
     # Generate dummy input tensors
     batch_size = 4
@@ -86,24 +88,28 @@ def export_tft_to_onnx(
     # Save TorchScript companion
     ts_path = out_path.with_suffix(".pt")
     try:
-        traced = torch.jit.trace(wrapper, dummy_inputs)
-        traced.save(str(ts_path))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            traced = torch.jit.trace(wrapper, dummy_inputs)
+            traced.save(str(ts_path))
     except Exception:
         pass
 
     # Save ONNX export
     try:
-        torch.onnx.export(
-            wrapper,
-            dummy_inputs,
-            str(out_path),
-            export_params=True,
-            opset_version=opset_version,
-            do_constant_folding=True,
-            input_names=input_names,
-            output_names=output_names,
-            dynamic_axes=dynamic_axes,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            torch.onnx.export(
+                wrapper,
+                dummy_inputs,
+                str(out_path),
+                export_params=True,
+                opset_version=opset_version,
+                do_constant_folding=True,
+                input_names=input_names,
+                output_names=output_names,
+                dynamic_axes=dynamic_axes,
+            )
     except Exception:
         return ts_path
 

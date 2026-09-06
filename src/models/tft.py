@@ -436,13 +436,13 @@ class TFT(nn.Module):
 
         # ── LSTM with static init ─────────────────────────────────────────
         n_layers = self.lstm.num_layers
-        h0 = self.h0_proj(c_e).view(B, n_layers, self.hidden_dim).permute(1, 0, 2).contiguous()
-        c0 = self.c0_proj(c_c).view(B, n_layers, self.hidden_dim).permute(1, 0, 2).contiguous()
+        h0 = self.h0_proj(c_e).view(-1, n_layers, self.hidden_dim).permute(1, 0, 2).contiguous()
+        c0 = self.c0_proj(c_c).view(-1, n_layers, self.hidden_dim).permute(1, 0, 2).contiguous()
 
         lstm_out, _ = self.lstm(lstm_input, (h0, c0))  # (B, T, hidden_dim)
 
         # Gated residual skip from temporal VSN input to LSTM output
-        gated = self.post_lstm_gate(lstm_out.reshape(B * T, -1)).view(B, T, -1)
+        gated = self.post_lstm_gate(lstm_out.reshape(-1, self.hidden_dim)).view(-1, T, self.hidden_dim)
         gated = self.post_lstm_ln(gated + lstm_input)
 
         # ── Self-Attention (full, non-causal) ─────────────────────────────────────────
@@ -452,11 +452,10 @@ class TFT(nn.Module):
         attn_out, attn_weights = self.attn(gated_pos)        # (B, T, hidden_dim)
 
         # Post-attention GRN conditioned on c_h (static attention context)
-        # Expand c_h to match temporal dimension: (B, hidden_dim) -> (B*T, hidden_dim)
-        c_h_exp = c_h.unsqueeze(1).expand(B, T, -1).reshape(B * T, -1)
+        c_h_exp = c_h.unsqueeze(1).repeat(1, T, 1).view(-1, self.hidden_dim)
         post = self.post_attn_grn(
-            attn_out.reshape(B * T, -1), context=c_h_exp
-        ).view(B, T, -1)
+            attn_out.reshape(-1, self.hidden_dim), context=c_h_exp
+        ).view(-1, T, self.hidden_dim)
         post = self.post_attn_ln(post + gated)
 
         # ── Quantile head on last timestep ────────────────────────────────
@@ -478,8 +477,8 @@ class TFT(nn.Module):
         Returns (B, T, n_enc_features) logits.
         self._vsn_select is registered in __init__ so it is included in state_dict.
         """
-        B, T, n_feat = x_enc.shape
-        ctx_exp  = context.unsqueeze(1).expand(B, T, -1)   # (B, T, hidden_dim)
+        T = x_enc.shape[1]
+        ctx_exp  = context.unsqueeze(1).repeat(1, T, 1)   # (B, T, hidden_dim)
         combined = torch.cat([ctx_exp, x_enc], dim=-1)     # (B, T, hidden_dim+n_feat)
         return self._vsn_select(combined)                   # (B, T, n_feat) logits
 
